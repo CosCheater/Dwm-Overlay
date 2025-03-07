@@ -11,3 +11,5 @@
 - #define VEHHOOK
 - 定义 `OUTADR` 宏则输出地址
 - #define OUTADR
+- 可以下载下来二进制文件使用Cheat Engine注入一下试试有无效果
+- 如果有问题可以在我主页找到我的联系方式

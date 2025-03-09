@@ -19,6 +19,12 @@
     <Filter Include="Header Files\VEHhook">
       <UniqueIdentifier>{1b52c20d-11f9-4421-bec4-2da6d74f3824}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\CALLJMP">
+      <UniqueIdentifier>{33800beb-71f6-4c48-be41-43ed203dd136}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\Util">
+      <UniqueIdentifier>{5e397e52-239f-4821-87dd-56b900a14624}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
@@ -47,6 +53,9 @@
     </ClCompile>
     <ClCompile Include="VEHhook\VEHhook.cpp">
       <Filter>Header Files\VEHhook</Filter>
+    </ClCompile>
+    <ClCompile Include="Util\Utils.cpp">
+      <Filter>Header Files\Util</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -83,5 +92,28 @@
     <ClInclude Include="includes.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Util\Utils.h">
+      <Filter>Header Files\Util</Filter>
+    </ClInclude>
+    <ClInclude Include="CALLJMP\AsmHook.h">
+      <Filter>Header Files\CALLJMP</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="CALLJMP\AsmHook.asm">
+      <Filter>Header Files\CALLJMP</Filter>
+    </MASM>
+    <MASM Include="CALLJMP\AsmHookimpl.asm">
+      <Filter>Header Files\CALLJMP</Filter>
+    </MASM>
+    <MASM Include="CALLJMP\AsmHookimpl_EX.asm">
+      <Filter>Header Files\CALLJMP</Filter>
+    </MASM>
+    <MASM Include="CALLJMP\AsmHookimpl_EX2.asm">
+      <Filter>Header Files\CALLJMP</Filter>
+    </MASM>
+    <MASM Include="CALLJMP\AsmHookImpl_EX3.asm">
+      <Filter>Header Files\CALLJMP</Filter>
+    </MASM>
   </ItemGroup>
 </Project>

@@ -36,7 +36,7 @@ public:
 	void Init(uintptr_t _DWM_fun, uintptr_t _MPO_fun, uintptr_t hDWM_fun, uintptr_t hMPO_fun);
 	// 卸载hook
 	void UnHOOK();
-	// 运行HOOK->其他模块线程HOOK
+	// 运行HOOK
 	int Run_HOOK();
 	// 暂停hook
 	void DWM_Pause_HOOK();

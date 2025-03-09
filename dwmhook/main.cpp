@@ -1,8 +1,5 @@
 #include "includes.hpp"
-//定义这个宏则使用VEHHOOK 不定义则使用MinHook
-#define VEHHOOK
-//定义这个宏则输出地址
-#define OUTADR
+
 // Data
 static ID3D11Device* g_pd3dDevice = nullptr;
 static ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
@@ -11,33 +8,9 @@ static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 RECT ProgramRect;
 ImFont* Font;
 
+UINT64 PresentCall = 0;
+
 bool debug = false;
-
-BOOL bDataCompare(const BYTE* pData, const BYTE* bMask, const char* szMask)
-{
-	for (; *szMask; ++szMask, ++pData, ++bMask)
-	{
-		if (*szMask == 'x' && *pData != *bMask)
-			return FALSE;
-	}
-	return (*szMask) == NULL;
-}
-
-DWORD64 FindPattern(const char* szModule, BYTE* bMask, const char* szMask)
-{
-	MODULEINFO mi{ };
-	GetModuleInformation(GetCurrentProcess(), GetModuleHandleA(szModule), &mi, sizeof(mi));
-
-	DWORD64 dwBaseAddress = DWORD64(mi.lpBaseOfDll);
-	const auto dwModuleSize = mi.SizeOfImage;
-
-	for (auto i = 0ul; i < dwModuleSize; i++)
-	{
-		if (bDataCompare(PBYTE(dwBaseAddress + i), bMask, szMask))
-			return DWORD64(dwBaseAddress + i);
-	}
-	return NULL;
-}
 
 void SetMouse()
 {
@@ -55,7 +28,7 @@ void SetMouse()
 	}
 }
 
-void DrawEverything(IDXGISwapChain* pDxgiSwapChain)
+extern "C" void DrawEverything(IDXGISwapChain* pDxgiSwapChain)
 {
 	static bool b = true;
 	if (b)
@@ -179,11 +152,11 @@ __int64 __fastcall hkPresentDWM_dxgi(IDXGISwapChain* pDxgiSwapChain, int a2, int
 
 UINT WINAPI MainThread(PVOID)
 {
-#ifdef VEHHOOK
-
-#else
+#ifndef CALLJMP
+#ifdef MINHOOK
 	MH_Initialize();
 #endif
+#endif // !CALLJMP
 	while (!GetModuleHandleA("dwmcore.dll"))
 		Sleep(150);
 
@@ -192,14 +165,15 @@ UINT WINAPI MainThread(PVOID)
 		{
 			return sig = sig + *reinterpret_cast<PULONG>(sig + 1) + 5;
 		};
-
-	//
 	// [ 48 8D 05 ? ? ? ? ] the relative addr will be converted to absolute addr
 	auto ResolveRelative = [](DWORD_PTR sig)
 		{
 			return sig = sig + *reinterpret_cast<PULONG>(sig + 0x3) + 0x7;
 		};
-
+	// to [E8 ? ? ? ? ]
+	auto AbsoluteToRelative = [](DWORD_PTR currentAddress, DWORD_PTR targetAddress) {
+		return targetAddress - (currentAddress + 5);
+		};
 	// 判断版本
 	typedef LONG(NTAPI* fnRtlGetVersion)(PRTL_OSVERSIONINFOW lpVersionInformation);
 	fnRtlGetVersion pRtlGetVersion = NULL;
@@ -209,6 +183,307 @@ UINT WINAPI MainThread(PVOID)
 	}
 	RTL_OSVERSIONINFOW osversion{};
 	pRtlGetVersion(&osversion);
+#ifdef CALLJMP
+	DWORD64 version = osversion.dwBuildNumber;
+	// win10 21h2 
+	if (version <= 19044)
+	{
+		auto dxgi = (UINT64)GetModuleHandleA("dxgi.dll");
+		// 拿到虚表
+		DWORD64 DrawingContext = FindPatternImage(dxgi,
+			"\x48\x8B\xC4\x41\x56\x48\x83\xEC\x00\x48\xC7\x40\x00\x00\x00\x00\x00\x48\x89\x58\x00\x48\x89\x68\x00\x48\x89\x78",
+			"xxxxxxxx?xxx?????xxx?xxx?xxx");
+
+		if (DrawingContext)
+		{
+			DWORD Protect = 0;
+			// 定位到第四个虚表地址
+			DrawingContext += 0x40;
+			// rv 
+			DrawingContext = ResolveRelative(DrawingContext);
+			// virtual table sixteen
+			PDWORD_PTR Vtbl = PDWORD_PTR(DrawingContext);
+#ifdef MODEL_ONE
+			if (Vtbl[16])
+			{
+				// presentimpl adr
+				DrawingContext = FindPattern(Vtbl[16], 0xFF, "\x20\xE8", "xx") + 1;
+				// get call adr == impl
+				DrawingContext = ResolveCall(DrawingContext);
+				// __guard_xfg_dispatch_icall_fptr
+				DrawingContext = FindPattern(DrawingContext, 0xFF, "\xFF\x15", "xx");
+#ifdef OUTADR
+				std::cout << std::hex << (DWORD64)DrawingContext << std::endl;
+#endif // OUTPUT
+				// 拿到LdrpDispatchUserCallTarget的值
+				PresentCall = DrawingContext + 6;
+				// 拿到LdrpDispatchUserCallTarget要跳转到的地址 也就是call的地址
+				DrawingContext += static_cast<unsigned long long>(+*(int*)(DrawingContext + 2)) + 6;
+				// 修改这个call
+				if (VirtualProtect((PVOID)DrawingContext, 8, PAGE_READWRITE, &Protect)) {
+
+					_InterlockedExchangePointer((PVOID*)DrawingContext, AsmLdrpDispatchUserCallTarget_impl);
+					VirtualProtect((PVOID)DrawingContext, 8, Protect, &Protect);
+				}
+			}
+#endif
+#ifdef MODEL_TWO
+			if (Vtbl[23])
+			{
+				// __guard_xfg_dispatch_icall_fptr
+				DrawingContext = FindPattern(Vtbl[23], 0xFF, "\xFF\x15", "xx");
+#ifdef OUTADR
+				std::cout << std::hex << (DWORD64)DrawingContext << std::endl;
+#endif	
+				// 拿到LdrpDispatchUserCallTarget的值
+				PresentCall = DrawingContext + 6;
+				DrawingContext += static_cast<unsigned long long>(+*(int*)(DrawingContext + 2)) + 6;
+				// 修改这个call
+				if (VirtualProtect((PVOID)DrawingContext, 8, PAGE_READWRITE, &Protect)) {
+
+					_InterlockedExchangePointer((PVOID*)DrawingContext, AsmLdrpDispatchUserCallTarget_impl_ex3);
+					VirtualProtect((PVOID)DrawingContext, 8, Protect, &Protect);
+				}
+			}
+#endif // MODEL_TWO
+			return true;
+		}
+	}
+	// win10 22h2
+	else if (version == 19045)
+	{
+		// get moudle adress
+		auto d2d1 = (UINT64)GetModuleHandleA("d2d1.dll");
+		// 拿到虚表
+		auto DrawingContext = FindPatternImage(d2d1, "\x48\x8D\x05\x00\x00\x00\x00\x33\xED\x48\x8D\x71\x08", "xxx????xxxxxx");
+		if (!DrawingContext) return FALSE;
+		// 计算虚表的值
+		DrawingContext += +*(int*)(DrawingContext + 3) + 7;
+		// 拿到PresentMultiplaneOverlay
+		auto PresentMultiplaneOverlay = ((UINT64*)DrawingContext)[7];
+		// 拿到LdrpDispatchUserCallTarget //.text:00000001801620CE FF 15 D4 17 1B 00 call    cs:__guard_dispatch_icall_fptr
+		auto LdrpDispatchUserCallTarget = FindPattern(PresentMultiplaneOverlay, 0x50, "\xFF\x15", "xx");
+		//auto LdrpDispatchUserCallTarget = FindPatternImage(d2d1, "\xE8\x6D\x64\x1A\x00\x48\x8B\xC8\x4C\x8B\x10\x49\x8B\x02", "xxxxxxxxxxxxxx");
+		if (!LdrpDispatchUserCallTarget) return FALSE;
+		// 拿到LdrpDispatchUserCallTarget的值
+		PresentCall = LdrpDispatchUserCallTarget + 6;
+		// 拿到LdrpDispatchUserCallTarget要跳转到的地址 也就是call的地址
+		LdrpDispatchUserCallTarget += static_cast<unsigned long long>(+*(int*)(LdrpDispatchUserCallTarget + 2)) + 6;
+		auto Protect = 0ul;
+		// 修改这个call
+		if (VirtualProtect((PVOID)LdrpDispatchUserCallTarget, 8, PAGE_READWRITE, &Protect)) {
+
+			_InterlockedExchangePointer((PVOID*)LdrpDispatchUserCallTarget, AsmLdrpDispatchUserCallTarget);
+
+			return VirtualProtect((PVOID)LdrpDispatchUserCallTarget, 8, Protect, &Protect);
+		}
+	}
+	// win11 21h2
+	else if (version == 22000)
+	{
+		auto dxgi = (UINT64)GetModuleHandleA("dxgi.dll");
+		// 拿到虚表
+		DWORD64 DrawingContext = FindPatternImage(dxgi, "\x40\x53\x48\x83\xEC\x20\x48\x8B\xD9\x48\x8D\x05\x00\x00\x00\x00", "xxxxxxxxxxxx????");
+
+		if (DrawingContext)
+		{
+			DWORD Protect = 0;
+			// 定位到第四个虚表地址
+			DrawingContext += 0x29;
+			// rv 
+			DrawingContext = ResolveRelative(DrawingContext);
+			// virtual table sixteen
+			PDWORD_PTR Vtbl = PDWORD_PTR(DrawingContext);
+#ifdef MODEL_ONE
+			if (Vtbl[16])
+			{
+				// presentimpl adr
+				DrawingContext = FindPattern(Vtbl[16], 0xFF, "\x20\xE8", "xx") + 1;
+				// get call adr == impl
+				DrawingContext = ResolveCall(DrawingContext);
+				// __guard_xfg_dispatch_icall_fptr
+				DrawingContext = FindPattern(DrawingContext, 0xFF, "\xFF\x15", "xx");
+#ifdef OUTADR
+				std::cout << std::hex << (DWORD64)DrawingContext << std::endl;
+#endif
+				// 拿到LdrpDispatchUserCallTarget的值
+				PresentCall = DrawingContext + 6;
+				// 拿到LdrpDispatchUserCallTarget要跳转到的地址 也就是call的地址
+				DrawingContext += static_cast<unsigned long long>(+*(int*)(DrawingContext + 2)) + 6;
+				// 修改这个call
+				if (VirtualProtect((PVOID)DrawingContext, 8, PAGE_READWRITE, &Protect)) {
+
+					_InterlockedExchangePointer((PVOID*)DrawingContext, AsmLdrpDispatchUserCallTarget_impl);
+					VirtualProtect((PVOID)DrawingContext, 8, Protect, &Protect);
+				}
+			}
+#endif
+#ifdef MODEL_TWO
+			if (Vtbl[23])
+			{
+				// __guard_xfg_dispatch_icall_fptr
+				DrawingContext = FindPattern(Vtbl[23], 0xFF, "\xFF\x15", "xx");
+#ifdef OUTADR
+				std::cout << std::hex << (DWORD64)DrawingContext << std::endl;
+#endif
+				// 拿到LdrpDispatchUserCallTarget的值
+				PresentCall = DrawingContext + 6;
+				DrawingContext += static_cast<unsigned long long>(+*(int*)(DrawingContext + 2)) + 6;
+				// 修改这个call
+				if (VirtualProtect((PVOID)DrawingContext, 8, PAGE_READWRITE, &Protect)) {
+					_InterlockedExchangePointer((PVOID*)DrawingContext, AsmLdrpDispatchUserCallTarget_impl);
+					VirtualProtect((PVOID)DrawingContext, 8, Protect, &Protect);
+				}
+			}
+#endif
+			return true;
+		}
+	}
+	// win11 22h2 - 23h2
+	else if (version > 22000 && version < 26100)
+	{
+		auto dxgi = (UINT64)GetModuleHandleA("dxgi.dll");
+		// 拿到虚表
+		DWORD64 DrawingContext = FindPatternImage(dxgi, "\x40\x53\x48\x83\xEC\x20\x48\x8B\xD9\x48\x8D\x05\x00\x00\x00\x00", "xxxxxxxxxxxx????");
+		if (DrawingContext)
+		{
+			DWORD Protect = 0;
+			// 定位到第四个虚表地址
+			DrawingContext += 0x29;
+			// rv 
+			DrawingContext = ResolveRelative(DrawingContext);
+			// virtual table sixteen
+			PDWORD_PTR Vtbl = PDWORD_PTR(DrawingContext);
+#ifdef MODEL_ONE
+			if (Vtbl[16])
+			{
+				// presentimpl adr
+				DrawingContext = FindPattern(Vtbl[16], 0xFF, "\x20\xE8", "xx") + 1;
+				// get call adr == impl
+				DrawingContext = ResolveCall(DrawingContext) - 0x100000000;
+				// __guard_xfg_dispatch_icall_fptr
+				DrawingContext = FindPattern(DrawingContext, 0xFF, "\xFF\x15", "xx");
+#ifdef OUTADR
+				std::cout << std::hex << (DWORD64)DrawingContext << std::endl;
+#endif	
+				// 拿到LdrpDispatchUserCallTarget的值
+				PresentCall = DrawingContext + 6;
+				// 拿到LdrpDispatchUserCallTarget要跳转到的地址 也就是call的地址
+				DrawingContext += static_cast<unsigned long long>(+*(int*)(DrawingContext + 2)) + 6;
+				// 修改这个call
+				if (VirtualProtect((PVOID)DrawingContext, 8, PAGE_READWRITE, &Protect)) {
+
+					_InterlockedExchangePointer((PVOID*)DrawingContext, AsmLdrpDispatchUserCallTarget_impl);
+					VirtualProtect((PVOID)DrawingContext, 8, Protect, &Protect);
+				}
+			}
+#endif
+#ifdef MODEL_TWO
+			if (Vtbl[23])
+			{
+				// __guard_xfg_dispatch_icall_fptr
+				DrawingContext = FindPattern(Vtbl[23], 0xFF, "\xFF\x15", "xx");
+#ifdef OUTADR
+				std::cout << std::hex << (DWORD64)DrawingContext << std::endl;
+#endif	
+				// 拿到LdrpDispatchUserCallTarget的值
+				PresentCall = DrawingContext + 6;
+				DrawingContext += static_cast<unsigned long long>(+*(int*)(DrawingContext + 2)) + 6;
+				// 修改这个call
+				if (VirtualProtect((PVOID)DrawingContext, 8, PAGE_READWRITE, &Protect)) {
+					_InterlockedExchangePointer((PVOID*)DrawingContext, AsmLdrpDispatchUserCallTarget_impl);
+					VirtualProtect((PVOID)DrawingContext, 8, Protect, &Protect);
+				}
+			}
+#endif
+			return true;
+		}
+	}
+	// win11 24h2
+	else if (version == 26100)
+	{
+		auto dxgi = (UINT64)GetModuleHandleA("dxgi.dll");
+		// 拿到虚表
+		DWORD64 DrawingContext = FindPatternImage(dxgi, "\x40\x53\x48\x83\xEC\x20\x48\x8B\xD9\x48\x8D\x05\x00\x00\x00\x00", "xxxxxxxxxxxx????");
+		if (DrawingContext)
+		{
+			DWORD Protect = 0;
+			// 定位到第四个虚表地址
+			DrawingContext += 0x29;
+			// rv 
+			DrawingContext = ResolveRelative(DrawingContext);
+			// virtual table sixteen
+			PDWORD_PTR Vtbl = PDWORD_PTR(DrawingContext);
+#ifdef MODEL_ONE
+			if (Vtbl[16])
+			{
+				DWORD64 MEM_NONE = Search(dxgi, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00");
+				// presentimpl adr
+				DrawingContext = FindPattern(Vtbl[16], 0xFF, "\x20\xE8", "xx") + 1;
+				// get call adr == impl
+				DrawingContext = ResolveCall(DrawingContext) - 0x100000000;
+				// __guard_xfg_dispatch_icall_fptr
+				DrawingContext = FindPattern(DrawingContext, 0xFF, "\x18\xE8", "xx") + 1;
+#ifdef OUTADR
+				std::cout << std::hex << (DWORD64)DrawingContext << std::endl;
+#endif	
+				// 拿到LdrpDispatchUserCallTarget的值
+				PresentCall = DrawingContext + 6;
+				// 构造shellcode
+				BYTE jmpCode[18] = { 0x50,0x48,0xB8,0,0,0,0,0,0,0,0,0xFF,0xE0 };
+				// 放入地址
+				*reinterpret_cast<DWORD_PTR*>(&jmpCode[3]) = (DWORD64)&AsmLdrpDispatchUserCallTarget_impl_ex;
+				// 注入shellcode
+				if (VirtualProtect((PVOID)MEM_NONE, 8, PAGE_EXECUTE_READWRITE, &Protect)) {
+					memcpy(((BYTE*)MEM_NONE), &jmpCode, sizeof(jmpCode));
+				}
+
+				// 再次构造shellcode
+				BYTE CallCode[] = { 0xE8,0,0,0,0 };
+				DWORD CALLADR = AbsoluteToRelative(DrawingContext, MEM_NONE);
+				memcpy(&CallCode[1], &CALLADR, sizeof(CALLADR)); // 构造完毕
+
+				// hook call
+				if (VirtualProtect((PVOID)DrawingContext, 8, PAGE_EXECUTE_READWRITE, &Protect)) {
+					memcpy(((BYTE*)DrawingContext), &CallCode, sizeof(CallCode)); // 写入shellcode
+					VirtualProtect((PVOID)DrawingContext, 8, Protect, &Protect);
+				}
+			}
+#endif
+#ifdef MODEL_TWO
+			if (Vtbl[23])
+			{
+				DWORD64 MEM_NONE2 = Search(dxgi, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00");
+				DrawingContext = FindPattern(Vtbl[23], 0xFF, "\x18\xE8", "xx") + 1;
+#ifdef OUTADR
+				std::cout << std::hex << (DWORD64)DrawingContext << std::endl;
+#endif	
+				// 拿到LdrpDispatchUserCallTarget的值
+				PresentCall = DrawingContext + 6;
+				// 构造shellcode
+				BYTE jmpCode[18] = { 0x50,0x48,0xB8,0,0,0,0,0,0,0,0,0xFF,0xE0 };
+				// 放入地址
+				*reinterpret_cast<DWORD_PTR*>(&jmpCode[3]) = (DWORD64)&AsmLdrpDispatchUserCallTarget_impl_ex2;
+				// 注入shellcode
+				if (VirtualProtect((PVOID)MEM_NONE2, 8, PAGE_EXECUTE_READWRITE, &Protect)) {
+					memcpy(((BYTE*)MEM_NONE2), &jmpCode, sizeof(jmpCode));
+				}
+
+				// 再次构造shellcode
+				BYTE CallCode[] = { 0xE8,0,0,0,0 };
+				DWORD CALLADR = AbsoluteToRelative(DrawingContext, MEM_NONE2);
+				memcpy(&CallCode[1], &CALLADR, sizeof(CALLADR)); // 构造完毕
+				// hook call
+				if (VirtualProtect((PVOID)DrawingContext, 8, PAGE_EXECUTE_READWRITE, &Protect)) {
+					memcpy(((BYTE*)DrawingContext), &CallCode, sizeof(CallCode)); // 写入shellcode
+					VirtualProtect((PVOID)DrawingContext, 8, Protect, &Protect);
+				}
+			}
+#endif	
+		}
+	}
+#else
+
 	//保存地址
 	DWORD64 dwRender = 0;
 #ifdef OUTADR
@@ -216,9 +491,10 @@ UINT WINAPI MainThread(PVOID)
 #endif
 	if (osversion.dwBuildNumber <= 19044)
 	{
+		auto dxgi = (UINT64)GetModuleHandleA("dxgi.dll");
 		//48 8B C4 41 56 48 83 EC ?? 48 C7 40 ?? ?? ?? ?? ?? 48 89 58 ?? 48 89 68 ?? 48 89 78
-		dwRender = FindPattern("dxgi.dll",
-			PBYTE("\x48\x8B\xC4\x41\x56\x48\x83\xEC\x00\x48\xC7\x40\x00\x00\x00\x00\x00\x48\x89\x58\x00\x48\x89\x68\x00\x48\x89\x78"),
+		dwRender = FindPatternImage(dxgi,
+			"\x48\x8B\xC4\x41\x56\x48\x83\xEC\x00\x48\xC7\x40\x00\x00\x00\x00\x00\x48\x89\x58\x00\x48\x89\x68\x00\x48\x89\x78",
 			"xxxxxxxx?xxx?????xxx?xxx?xxx");
 		if (dwRender)
 		{
@@ -246,8 +522,9 @@ UINT WINAPI MainThread(PVOID)
 	}
 	if (osversion.dwBuildNumber == 19045)
 	{
+		auto d2d1 = (UINT64)GetModuleHandleA("d2d1.dll");
 		//48 8D 05 ?? ?? ?? ?? 33 ED 48 8D 71 08
-		dwRender = FindPattern("d2d1.dll", PBYTE("\x48\x8D\x05\x00\x00\x00\x00\x33\xED\x48\x8D\x71\x08"), "xxx????xxxxxx");
+		dwRender = FindPatternImage(d2d1, "\x48\x8D\x05\x00\x00\x00\x00\x33\xED\x48\x8D\x71\x08", "xxx????xxxxxx");
 		if (dwRender)
 		{
 			dwRender = ResolveRelative(dwRender);
@@ -274,9 +551,10 @@ UINT WINAPI MainThread(PVOID)
 	}
 	if (osversion.dwBuildNumber >= 22000)
 	{
+		auto dxgi = (UINT64)GetModuleHandleA("dxgi.dll");
 		//40 53 48 83 EC 20 48 8B D9 48 8D 05 ?? ?? ?? ??
-		dwRender = FindPattern("dxgi.dll",
-			PBYTE("\x40\x53\x48\x83\xEC\x20\x48\x8B\xD9\x48\x8D\x05\x00\x00\x00\x00"),
+		dwRender = FindPatternImage(dxgi,
+			"\x40\x53\x48\x83\xEC\x20\x48\x8B\xD9\x48\x8D\x05\x00\x00\x00\x00",
 			"xxxxxxxxxxxx????");
 		if (dwRender)
 		{
@@ -288,7 +566,7 @@ UINT WINAPI MainThread(PVOID)
 			std::cout << std::hex << dwRender << std::endl;
 			std::cout << std::hex << PVOID(Vtbl[16]) << std::endl;
 			std::cout << std::hex << PVOID(Vtbl[23]) << std::endl;
-			
+
 #endif
 
 #ifdef VEHHOOK
@@ -303,6 +581,7 @@ UINT WINAPI MainThread(PVOID)
 #endif
 		}
 	}
+#endif
 	return 0;
 }
 
